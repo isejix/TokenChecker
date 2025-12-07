@@ -9,7 +9,8 @@ class LogNUmber(Base):
     number = Column(String)
     email = Column(String,nullable=True,default="-")
     code = Column(Integer)  
-    name = Column(String)  
+    name = Column(String)
+    link = Column(String)  
 
     
     

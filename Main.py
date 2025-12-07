@@ -7,9 +7,11 @@ from Domain.Repository import StepRepo, ReceivedNumbersRepo, CachRepo ,LogNumber
 from Domain.DB import Database
 import re
 import os
-import requests
+import aiohttp
+import asyncio
 import random
 import time
+running_tasks = {}
 
 Config = configparser.ConfigParser()
 Config.read("./confing.ini")
@@ -17,8 +19,8 @@ api_id = Config.get("Info", "api_id")
 api_hash = Config.get("Info", "api_hash")
 bot_token = Config.get("Info", "bot_token")
 
-proxy = (socks.SOCKS5, '127.0.0.1', 2080)
-Client = TelegramClient("TokenChecker", api_id=int(api_id), api_hash=str(api_hash),proxy=proxy)
+# proxy = (socks.SOCKS5, '127.0.0.1', 2080)
+Client = TelegramClient("TokenChecker", api_id=int(api_id), api_hash=str(api_hash))
 
 def is_sudo(chatid):
     
@@ -86,58 +88,105 @@ async def Onmessege(m):
         if isvalid is None:
 
             link = await ReceivedNumbersRepo.get_number_by_phone(number)
-            
+                
             link = link.link
-            
+                
             isany = await CachRepo.get_user_cache_value(chatid,"number")
-            
+                
             if isany is None:
-            
+                
                 await CachRepo.create_Cach(chatid,"number",number)
-            
+                
             await CachRepo.update_user_cache_value(chatid,"number",number)
-            
-            # await m.answer("Checking code... ⏳") 
-            
+                
+                # await m.answer("Checking code... ⏳") 
+                
             key = keyboard.getcode(number)
-            
-            messege = await m.respond(f"Number: {number}",buttons = key)
+                
+            messege = await m.respond(f"Number 📱: {number}",buttons = key)
 
-            code = check_code(link)
+            task = start_check(chatid=chatid,link=link)
             
+            code = await task
+                
             if code is not None:
-                
-                await messege.delete()
-                
-                await ReceivedNumbersRepo.update_status_by_number(number,ReceivedNumbersRepo.SessionStatus.Accepted)
-                
-                key = keyboard.getautocode(number)
-                
-                with open("name.txt", "r", encoding="utf-8") as f:
                     
+                await messege.delete()
+                    
+                await ReceivedNumbersRepo.update_status_by_number(number,ReceivedNumbersRepo.SessionStatus.Accepted)
+                    
+                key = keyboard.getautocode(number)
+                    
+                with open("name.txt", "r", encoding="utf-8") as f:
+                        
                     content = f.read()
 
                 names = [name.strip() for name in content.split(",") if name.strip()]
 
                 random_name = random.choice(names)
-                
+                    
                 await CachRepo.create_Cach(chatid,"name",random_name)
-                
+                    
                 isany = await CachRepo.get_user_cache_value(chatid,"code")
-                
+                    
                 if isany is None:
-                
+                    
                     await CachRepo.create_Cach(chatid,"code",code)
-                
+                    
                 await CachRepo.update_user_cache_value(chatid,"code",code)
-                
-                await LogNumberRepo.create_log_number(number=number,code=code,name=random_name)
-                
-                await m.respond(f"Number: {number}\nCode: {code}\nFull name: {random_name}",buttons = key)
+                    
+                await LogNumberRepo.create_log_number(number=number,code=code,name=random_name,link=link)
+                    
+                await m.respond(f"Number 📱: {number}\nCode 🔑: {code}\nFull name 📄: {random_name}",buttons = key)
         
         else:
             
             await m.respond(f"The number {number} is already exsist ⚠️")
+            
+            link = await ReceivedNumbersRepo.get_number_by_phone(number)
+                
+            link = link.link
+                
+            isany = await CachRepo.get_user_cache_value(chatid,"number")
+                
+            if isany is None:
+                
+                await CachRepo.create_Cach(chatid,"number",number)
+                
+            await CachRepo.update_user_cache_value(chatid,"number",number)
+                
+                # await m.answer("Checking code... ⏳") 
+                
+            key = keyboard.getcode(number)
+                
+            messege = await m.respond(f"Number 📱: {number}",buttons = key)
+
+            task = start_check(chatid=chatid,link=link)
+            
+            code = await task
+                
+            if code is not None:
+                
+                await messege.delete()
+                    
+                await ReceivedNumbersRepo.update_status_by_number(number,ReceivedNumbersRepo.SessionStatus.Accepted)
+                    
+                key = keyboard.getautocode(number)
+                    
+                isany = await CachRepo.get_user_cache_value(chatid,"code")
+                    
+                if isany is None:
+                    
+                    await CachRepo.create_Cach(chatid,"code",code)
+                    
+                await CachRepo.update_user_cache_value(chatid,"code",code)
+                
+                name = await LogNumberRepo.get_name_by_number(number)
+                    
+                await LogNumberRepo.update_log_number(number=number,code=code,name=name)
+                    
+                await m.respond(f"Number 📱: {number}\nCode 🔑: {code}\nFull name 📄: {name}",buttons = key)
+                
             
     elif text == "Delete File ⭕️":
         
@@ -178,6 +227,8 @@ async def Onmessege(m):
         if step == "GetFile":
             
             if m.document and m.file.name.endswith(".txt"):
+                
+                os.makedirs("./downloads", exist_ok=True)
                 
                 path = f"./downloads/{m.file.name}"
                 
@@ -242,25 +293,20 @@ async def Onmessege(m):
                 
                     new_numbers.append(f"{phone} → {item['link']}")
 
-                path_old = "./downloads/already_saved.txt"
-                
-                path_new = "./downloads/new_saved.txt"
+                path_old = os.path.abspath("./downloads/already_saved.txt")
+                path_new = os.path.abspath("./downloads/new_saved.txt")
 
-                with open(path_old, "w") as f:
-                
-                    f.write(f"This {len(already_saved_numbers)} number is already exist in database ❗️\n\n")
-                
-                    for line in already_saved_numbers:
-                
-                        f.write(line + "\n")
+                if already_saved_numbers:
+                    with open(path_old, "w", encoding="utf-8") as f:
+                        f.write(f"{len(already_saved_numbers)} numbers already exist ❗️\n\n")
+                        for line in already_saved_numbers:
+                            f.write(line + "\n")
 
-                with open(path_new, "w") as f:
-                
-                    f.write(f"Saved {len(new_numbers)} numbers successfully ✅\n\n")
-                
-                    for line in new_numbers:
-                
-                        f.write(line + "\n")
+                if new_numbers:
+                    with open(path_new, "w", encoding="utf-8") as f:
+                        f.write(f"Saved {len(new_numbers)} numbers successfully ✅\n\n")
+                        for line in new_numbers:
+                            f.write(line + "\n")
 
                 if already_saved_numbers:
                 
@@ -269,12 +315,8 @@ async def Onmessege(m):
                 if new_numbers:
                 
                     await m.reply("Newly saved numbers ⬇️", file=path_new)
-
-                os.remove(path_old)
-                
-                os.remove(path_new)
-                
-                os.remove(path)
+                    
+                asyncio.create_task(delete_later([path, path_old, path_new]))
                 
                 await StepRepo.delete_step(chatid)
             
@@ -329,14 +371,17 @@ async def callbacks(m):
         isvalid = await LogNumberRepo.get_log_number_by_number(number)
         
         if isvalid is None:
-
+        
             link = await ReceivedNumbersRepo.get_number_by_phone(number)
         
             link = link.link
             
             await m.answer("Checking code... ⏳") 
+
+
+            task = start_check(chatid=chatid,link=link)
             
-            code = check_code(link)
+            code = await task
             
             if code:
                 
@@ -353,22 +398,63 @@ async def callbacks(m):
                 await ReceivedNumbersRepo.update_status_by_number(number,ReceivedNumbersRepo.SessionStatus.Accepted)
                 
                 key = keyboard.getautocode(number)
-
+                
                 name = await CachRepo.get_user_cache_value(chatid,"name")
-
-                await LogNumberRepo.create_log_number(number=number,code=code,name=name)
                 
-                await m.respond(f"Number: {number}\nNew Code: {code}\nFull name: {name}",buttons = key)
+                await LogNumberRepo.create_log_number(number=number,code=code,name=name,link=link)
                 
-            else:
+                await m.delete()
                 
-                await ReceivedNumbersRepo.update_status_by_number(number,ReceivedNumbersRepo.SessionStatus.Pending)
+                await m.respond(f"Number 📱: {number}\nCode 🔑: {code}\nFull name 📄: {name}",buttons = key)
                 
-                await m.respond("No code found in 5 minutes ⚠️")
             
         else:
             
             await m.respond(f"The number {number} is already exsist ⚠️")
+            
+            link = await ReceivedNumbersRepo.get_number_by_phone(number)
+                
+            link = link.link
+                
+            isany = await CachRepo.get_user_cache_value(chatid,"number")
+                
+            if isany is None:
+                
+                await CachRepo.create_Cach(chatid,"number",number)
+                
+            await CachRepo.update_user_cache_value(chatid,"number",number)
+                
+                # await m.answer("Checking code... ⏳") 
+                
+            key = keyboard.getcode(number)
+                
+            messege = await m.respond(f"Number: {number}",buttons = key)
+
+            task = start_check(chatid=chatid,link=link)
+            
+            code = await task
+                
+            if code is not None:
+                    
+                await ReceivedNumbersRepo.update_status_by_number(number,ReceivedNumbersRepo.SessionStatus.Accepted)
+                    
+                key = keyboard.getautocode(number)
+                    
+                isany = await CachRepo.get_user_cache_value(chatid,"code")
+                
+                await messege.delete()
+                    
+                if isany is None:
+                    
+                    await CachRepo.create_Cach(chatid,"code",code)
+                    
+                await CachRepo.update_user_cache_value(chatid,"code",code)
+                
+                name = await LogNumberRepo.get_name_by_number(number)
+                    
+                await LogNumberRepo.update_log_number(number=number,code=code,name=name)
+                    
+                await m.respond(f"Number 📱: {number}\nCode 🔑: {code}\nFull name 📄: {name}",buttons = key)
             
         
     elif "next_" in data:
@@ -525,6 +611,10 @@ async def callbacks(m):
             
             await StepRepo.delete_step(chatid)
             
+        if running_tasks is not None:
+
+            cancel_check(chatid)
+            
         key = keyboard.start()
         
         await m.edit("The proccess was seccessfuly canceled ✅",buttons = key)
@@ -550,6 +640,20 @@ async def callbacks(m):
         # await CachRepo.get_user_cache_value(chatid,"number",number)
             
         await StepRepo.create_step(chatid,"sendemail")
+    
+    elif "remove_" in data:
+        
+        number = data.replace("remove_","")
+        
+        await LogNumberRepo.delete_log_number(number)
+
+        numbers = await LogNumberRepo.get_all_log_numbers()
+
+        key = keyboard.key_log_numbers(numbers)
+        
+        await m.delete()
+        
+        await m.respond("This is the numbers info ℹ️",buttons = key)  
         
     elif "page_" in data:
         
@@ -589,30 +693,54 @@ async def callbacks(m):
         
         await m.edit(f"List of number from {filename} file 📑\npage({page})", buttons=key)
         
-def check_code(link: str):
-    
-    duration = 5 * 60 
-    end_time = time.time() + duration
 
+      
+async def check_code(chatid: int, link: str, duration: int = 300, interval: float = 2.0):
     code_pattern = re.compile(r"\b\d{5}\b")
+    end_time = asyncio.get_event_loop().time() + duration
 
-    while time.time() < end_time:
-        try:
-            response = requests.get(link, timeout=10)
-            text = response.text
+    try:
+        async with aiohttp.ClientSession() as session:
+            while asyncio.get_event_loop().time() < end_time:
+                if running_tasks.get(chatid) is None:
+                    print(f"Task for chat {chatid} cancelled")
+                    return None
 
-            match = code_pattern.search(text)
-            if match:
-                code = match.group()
-                print(f"✅ CODE FOUND: {code}")
-                return code 
+                try:
+                    async with session.get(link, timeout=10) as resp:
+                        text = await resp.text()
+                        match = code_pattern.search(text)
+                        if match:
+                            code = match.group()
+                            print(f"✅ CODE FOUND: {code}")
+                            return code
+                except Exception as e:
+                    print("❌ ERROR:", e)
 
-        except Exception as e:
-            print("❌ ERROR:", e)
+                await asyncio.sleep(interval)
 
-        time.sleep(2)  
+    except asyncio.CancelledError:
+        print(f"Task for chat {chatid} cancelled by asyncio")
+        return None
 
+    print("❌ No code found within the time limit")
     return None
+
+def start_check(chatid: int, link: str):
+    task = asyncio.create_task(check_code(chatid, link))
+    running_tasks[chatid] = task
+    return task
+
+def cancel_check(chatid: int):
+    task = running_tasks.pop(chatid, None)
+    if task:
+        task.cancel()
+
+async def delete_later(files):
+    await asyncio.sleep(2)
+    for f in files:
+        if os.path.exists(f):
+            os.remove(f)
 
 async def run(): 
     await Database.init_db()
